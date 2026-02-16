@@ -36,7 +36,11 @@ def load_data():
                     if chunk:
                         f.write(chunk)
 
-    df = pl.scan_parquet(parquet_path)
+    df = pl.scan_parquet(parquet_path).select([
+        'tpep_pickup_datetime', 'tpep_dropoff_datetime',
+        'PULocationID', 'DOLocationID',
+        'trip_distance', 'fare_amount', 'total_amount', 'payment_type',
+    ])
     df = df.drop_nulls(
         subset=['tpep_pickup_datetime', 'tpep_dropoff_datetime', 'PULocationID', 'DOLocationID', 'fare_amount']
     ).filter(
