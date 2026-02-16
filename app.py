@@ -4,6 +4,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import duckdb
 import os
+import requests
 
 st.set_page_config(page_title="NYC Yellow Taxi Trips", layout="wide")
 
@@ -17,12 +18,23 @@ def load_data():
     parquet_path = f'{DATA_DIR}/yellow_tripdata_2024-01.parquet'
     csv_path = f'{DATA_DIR}/taxi_zone_lookup.csv'
 
-    if not os.path.exists(parquet_path):
-        st.error(f"Data file not found: {parquet_path}. Please run the notebook first to download the data.")
-        st.stop()
+    os.makedirs(DATA_DIR, exist_ok=True)
+
     if not os.path.exists(csv_path):
-        st.error(f"Data file not found: {csv_path}. Please run the notebook first to download the data.")
-        st.stop()
+        with st.spinner('Downloading taxi zone lookup...'):
+            r = requests.get('https://d37ci6vzurychx.cloudfront.net/misc/taxi_zone_lookup.csv')
+            r.raise_for_status()
+            with open(csv_path, 'wb') as f:
+                f.write(r.content)
+
+    if not os.path.exists(parquet_path):
+        with st.spinner('Downloading trip data (~48 MB)...'):
+            r = requests.get('https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet', stream=True)
+            r.raise_for_status()
+            with open(parquet_path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
 
     df = pl.scan_parquet(parquet_path)
     df = df.drop_nulls(
