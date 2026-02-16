@@ -299,7 +299,7 @@ with tab5:
         y=day_order,
         colorscale='Teal',
         text=z_values,
-        texttemplate='%{text:,}',
+        texttemplate='%{text:,.2s}',
         textfont=dict(size=9),
     ))
     fig.update_layout(
