@@ -164,7 +164,7 @@ with tab1:
         yaxis=dict(ticksuffix='  '),
         height=500, autosize=True,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
     st.markdown("""
     **Insights:** Midtown Center and Upper East Side South consistently rank as the busiest pickup zones,
@@ -196,7 +196,7 @@ with tab2:
         yaxis=dict(tickprefix='$', tickformat='.2f'),
         height=500, autosize=True,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
     st.markdown("""
     **Insights:** Fares peak sharply around 5-6 AM, likely driven by early morning airport runs which
@@ -223,7 +223,7 @@ with tab3:
         yaxis=dict(title='Number of Trips'),
         height=500, autosize=True,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
     st.markdown("""
     **Insights:** The distribution is heavily right-skewed, with the vast majority of trips falling
@@ -264,7 +264,7 @@ with tab4:
         yaxis=dict(ticksuffix='  '),
         height=400, autosize=True,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
     st.markdown("""
     **Insights:** Credit card payments overwhelmingly dominate at around 80% of all trips, reflecting
@@ -324,7 +324,7 @@ with tab5:
         yaxis=dict(title='', autorange='reversed'),
         height=450, autosize=True,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
     st.markdown("""
     **Insights:** Weekday evenings (5-7 PM) show the highest trip volumes, aligning with the evening
