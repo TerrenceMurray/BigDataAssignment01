@@ -13,8 +13,7 @@ CHART_COLOR = '#2a9d8f'
 # Load data
 DATA_DIR = './data/raw'
 
-@st.cache_data
-def load_data():
+def ensure_data():
     parquet_path = f'{DATA_DIR}/yellow_tripdata_2024-01.parquet'
     csv_path = f'{DATA_DIR}/taxi_zone_lookup.csv'
 
@@ -22,10 +21,12 @@ def load_data():
 
     if not os.path.exists(csv_path):
         with st.spinner('Downloading taxi zone lookup...'):
-            r = requests.get('https://d37ci6vzurychx.cloudfront.net/misc/taxi_zone_lookup.csv')
+            r = requests.get('https://d37ci6vzurychx.cloudfront.net/misc/taxi_zone_lookup.csv', stream=True)
             r.raise_for_status()
             with open(csv_path, 'wb') as f:
-                f.write(r.content)
+                for chunk in r.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
 
     if not os.path.exists(parquet_path):
         with st.spinner('Downloading trip data (~48 MB)...'):
@@ -36,35 +37,45 @@ def load_data():
                     if chunk:
                         f.write(chunk)
 
-    df = pl.scan_parquet(parquet_path).select([
-        'tpep_pickup_datetime', 'tpep_dropoff_datetime',
-        'PULocationID', 'DOLocationID',
-        'trip_distance', 'fare_amount', 'total_amount', 'payment_type',
-    ])
-    df = df.drop_nulls(
-        subset=['tpep_pickup_datetime', 'tpep_dropoff_datetime', 'PULocationID', 'DOLocationID', 'fare_amount']
-    ).filter(
-        ~(
-            (pl.col('trip_distance') <= 0) |
-            (pl.col('fare_amount') < 0) |
-            (pl.col('fare_amount') > 500.0) |
-            (pl.col('tpep_dropoff_datetime') < pl.col('tpep_pickup_datetime'))
-        )
-    ).with_columns(
-        (pl.col('tpep_dropoff_datetime') - pl.col('tpep_pickup_datetime')).dt.total_minutes().alias('trip_duration_minutes'),
-    ).with_columns(
-        pl.when(pl.col('trip_duration_minutes') != 0)
-          .then(pl.col('trip_distance') / (pl.col('trip_duration_minutes') / 60))
-          .otherwise(0)
-          .alias('trip_speed_mph'),
-        pl.col('tpep_pickup_datetime').dt.hour().alias('pickup_hour'),
-        pl.col('tpep_pickup_datetime').dt.to_string('%A').alias('pickup_day_of_week'),
-    ).collect()
+    return parquet_path, csv_path
 
-    zones = pl.read_csv(csv_path)
-    return df, zones
+parquet_path, csv_path = ensure_data()
 
-df, zones = load_data()
+# Create DuckDB connection with views over on-disk files (no full data load)
+con = duckdb.connect()
+
+con.execute(f"""
+    CREATE VIEW trips AS
+    SELECT
+        tpep_pickup_datetime,
+        tpep_dropoff_datetime,
+        PULocationID,
+        DOLocationID,
+        trip_distance,
+        fare_amount,
+        total_amount,
+        payment_type,
+        DATEDIFF('minute', tpep_pickup_datetime, tpep_dropoff_datetime) AS trip_duration_minutes,
+        CASE
+            WHEN DATEDIFF('minute', tpep_pickup_datetime, tpep_dropoff_datetime) != 0
+            THEN trip_distance / (DATEDIFF('minute', tpep_pickup_datetime, tpep_dropoff_datetime) / 60.0)
+            ELSE 0
+        END AS trip_speed_mph,
+        HOUR(tpep_pickup_datetime) AS pickup_hour,
+        DAYNAME(tpep_pickup_datetime) AS pickup_day_of_week
+    FROM read_parquet('{parquet_path}')
+    WHERE tpep_pickup_datetime IS NOT NULL
+      AND tpep_dropoff_datetime IS NOT NULL
+      AND PULocationID IS NOT NULL
+      AND DOLocationID IS NOT NULL
+      AND fare_amount IS NOT NULL
+      AND trip_distance > 0
+      AND fare_amount >= 0
+      AND fare_amount <= 500.0
+      AND tpep_dropoff_datetime >= tpep_pickup_datetime
+""")
+
+con.execute(f"CREATE TABLE zones AS SELECT * FROM read_csv_auto('{csv_path}')")
 
 # Title and introduction
 st.title("New York City Yellow Taxi Trips")
@@ -76,8 +87,13 @@ st.markdown("")
 with st.sidebar:
     st.header("Filters")
 
-    min_date = df['tpep_pickup_datetime'].dt.date().min()
-    max_date = df['tpep_pickup_datetime'].dt.date().max()
+    date_bounds = con.execute("""
+        SELECT MIN(CAST(tpep_pickup_datetime AS DATE)),
+               MAX(CAST(tpep_pickup_datetime AS DATE))
+        FROM trips
+    """).fetchone()
+    min_date, max_date = date_bounds
+
     date_range = st.date_input(
         "Date Range",
         value=(min_date, max_date),
@@ -105,22 +121,26 @@ if len(date_range) != 2:
     st.stop()
 
 start_date, end_date = date_range
+payment_list = ','.join(str(p) for p in selected_payments)
 
-# Apply filters
-filtered = df.filter(
-    (pl.col('tpep_pickup_datetime').dt.date() >= start_date) &
-    (pl.col('tpep_pickup_datetime').dt.date() <= end_date) &
-    (pl.col('pickup_hour') >= hour_range[0]) &
-    (pl.col('pickup_hour') <= hour_range[1]) &
-    (pl.col('payment_type').is_in(selected_payments))
-)
+# Apply filters as a streaming view (no data materialised)
+con.execute(f"""
+    CREATE OR REPLACE VIEW filtered AS
+    SELECT * FROM trips
+    WHERE CAST(tpep_pickup_datetime AS DATE) >= '{start_date}'
+      AND CAST(tpep_pickup_datetime AS DATE) <= '{end_date}'
+      AND pickup_hour >= {hour_range[0]}
+      AND pickup_hour <= {hour_range[1]}
+      AND payment_type IN ({payment_list})
+""")
 
-if filtered.is_empty():
+count = con.execute("SELECT COUNT(*) FROM filtered").fetchone()[0]
+if count == 0:
     st.warning("No trips match the selected filters. Try adjusting the date range, hours, or payment types.")
     st.stop()
 
 # Key metrics
-stats = duckdb.sql("""
+stats = con.execute("""
     SELECT
         COUNT(*) as total_trips,
         ROUND(AVG(fare_amount), 2) as avg_fare,
@@ -143,11 +163,11 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["Pickup Zones", "Hourly Fares", "Trip Di
 # --- Tab 1: Bar chart - Top 10 pickup zones ---
 with tab1:
     st.header("Top 10 Busiest Pickup Zones")
-    result = duckdb.sql("""
+    result = con.execute("""
         SELECT z.Zone as zone, COUNT(*) as trip_count
-        FROM filtered
-        JOIN zones z ON filtered.PULocationID = z.LocationID
-        GROUP BY filtered.PULocationID, z.Zone
+        FROM filtered f
+        JOIN zones z ON f.PULocationID = z.LocationID
+        GROUP BY f.PULocationID, z.Zone
         ORDER BY trip_count DESC
         LIMIT 10
     """).pl().reverse()
@@ -176,7 +196,7 @@ with tab1:
 # --- Tab 2: Line chart - Average fare by hour ---
 with tab2:
     st.header("Average Fare by Hour of Day")
-    result = duckdb.sql("""
+    result = con.execute("""
         SELECT pickup_hour as hour_of_day,
                ROUND(AVG(fare_amount), 2) as avg_fare
         FROM filtered
@@ -208,13 +228,20 @@ with tab2:
 # --- Tab 3: Histogram - Trip distance distribution ---
 with tab3:
     st.header("Distribution of Trip Distances")
-    trip_distances = duckdb.sql("""
-        SELECT trip_distance FROM filtered WHERE trip_distance <= 30
+    # Pre-aggregate into bins in SQL to avoid materialising all individual rows
+    trip_hist = con.execute("""
+        SELECT
+            FLOOR(trip_distance * 2) / 2.0 AS bin_start,
+            COUNT(*) AS trip_count
+        FROM filtered
+        WHERE trip_distance <= 30
+        GROUP BY bin_start
+        ORDER BY bin_start
     """).pl()
 
-    fig = px.histogram(
-        trip_distances, x='trip_distance', nbins=60,
-        labels={'trip_distance': 'Trip Distance (miles)', 'count': 'Number of Trips'},
+    fig = px.bar(
+        trip_hist, x='bin_start', y='trip_count',
+        labels={'bin_start': 'Trip Distance (miles)', 'trip_count': 'Number of Trips'},
     )
     fig.update_traces(marker_color=CHART_COLOR)
     fig.update_layout(
@@ -235,7 +262,7 @@ with tab3:
 # --- Tab 4: Bar chart - Payment type breakdown ---
 with tab4:
     st.header("Trip Breakdown by Payment Type")
-    result = duckdb.sql("""
+    result = con.execute("""
         SELECT
             CASE payment_type
                 WHEN 1 THEN 'Credit Card'
@@ -276,7 +303,7 @@ with tab4:
 # --- Tab 5: Heatmap - Trips by day of week and hour ---
 with tab5:
     st.header("Trip Volume by Day of Week and Hour")
-    result = duckdb.sql("""
+    result = con.execute("""
         SELECT pickup_day_of_week, pickup_hour, COUNT(*) as trip_count
         FROM filtered
         GROUP BY pickup_day_of_week, pickup_hour
